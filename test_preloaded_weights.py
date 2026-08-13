@@ -1,7 +1,7 @@
 import tiktoken
 import torch
 
-from train_gpt2 import GPT, GPTConfig
+from gpt import GPT, GPTConfig
 
 num_return_sequences = 5
 max_length = 30
@@ -13,8 +13,8 @@ elif hasattr(torch.backends, "mps") and torch.mps.is_available():
     device = "mps"
 print(f"Using device - {device}")
 
-model = GPT(GPTConfig())
-# model = GPT.from_pretrained("gpt2")
+# model = GPT(GPTConfig())
+model = GPT.from_pretrained("gpt2")
 model.eval()
 model.to(device)
 
@@ -30,7 +30,7 @@ torch.manual_seed(42)
 
 while x.size(1) < max_length:
     with torch.no_grad():
-        logits = model(x)
+        logits, _ = model(x)
         logits = logits[:, -1, :]
         probs = logits.softmax(-1)
         topk_probs, topk_indices = torch.topk(probs, 50, -1)

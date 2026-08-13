@@ -1,3 +1,4 @@
+import inspect
 import math
 from dataclasses import dataclass
 
@@ -13,7 +14,7 @@ class ResidualProjection(nn.Linear):
 
 @dataclass
 class GPTConfig:
-    vocabulary_size: int = 50257
+    vocabulary_size: int = 50304  # Optimization 5 - overridden to a nice number
     context_size: int = 1024
     embedding_size: int = 768
     attention_head_size: int = 64
@@ -66,7 +67,7 @@ class GPT(nn.Module):
     def forward(self, tokens, targets=None):
         _, sequence_size = tokens.size()  # B x S
         token_embeddings = self.token_embedding(tokens)  # B x S x E
-        positions = self.positions.to(tokens.device) # S
+        positions = self.positions.to(tokens.device)  # S
         positions = positions[:sequence_size]  # S
         position_embeddings = self.position_embedding(positions)  # B x S x E
         hidden_states = token_embeddings + position_embeddings  # B x S x E
@@ -80,6 +81,33 @@ class GPT(nn.Module):
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         return logits, loss
+
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # Only decay 2D parameters. Decay weights in matmuls and embeddings, don't decay biases and layernorms.
+        parameters = [parameter for _, parameter in self.named_parameters() if parameter.requires_grad]
+        parameters_to_decay = [parameter for parameter in parameters if parameter.dim() >= 2]
+        parameters_not_to_decay = [parameter for parameter in parameters if parameter.dim() < 2]
+        parameter_groups = [
+            {
+                "params": parameters_to_decay,
+                "weight_decay": weight_decay
+            },
+            {
+                "params": parameters_not_to_decay,
+                "weight_decay": 0.0
+            }
+        ]
+
+        num_decayed_parameters = sum(parameter.numel() for parameter in parameters_to_decay)
+        num_non_decayed_parameters = sum(parameter.numel() for parameter in parameters_not_to_decay)
+        print(f"Decayed tensors - {len(parameters_to_decay)}, decayed parameters - {num_decayed_parameters:,}")
+        print(f"Non-decayed tensors - {len(parameters_not_to_decay)}, non-decayed parameters - {num_non_decayed_parameters:,}")
+
+        fused = "fused" in inspect.signature(torch.optim.AdamW).parameters and device == "cuda"
+        print(f"Using fused Adam - {fused}")
+
+        optimizer = torch.optim.AdamW(parameter_groups, lr=learning_rate, betas=(0.9, 0.95), eps=1e-8, fused=fused)
+        return optimizer
 
     @classmethod
     def from_pretrained(cls, model_type):
@@ -255,32 +283,38 @@ class AttentionHead(nn.Module):
         self.key_layer = nn.Linear(config.embedding_size, config.attention_head_size)
         self.query_layer = nn.Linear(config.embedding_size, config.attention_head_size)
         self.value_layer = nn.Linear(config.embedding_size, config.attention_head_size)
-        self.register_buffer(
-            "lower_triangular",
-            torch.tril(torch.ones(config.context_size, config.context_size)),
-        )
+        # self.register_buffer(
+        #     "lower_triangular",
+        #     torch.tril(torch.ones(config.context_size, config.context_size)),
+        # )
 
     def forward(self, hidden_states):
-        _, sequence_size, _ = hidden_states.size()  # B x S x E
         keys = self.key_layer(hidden_states)  # B x S x H
         queries = self.query_layer(hidden_states)  # B x S x H
-        scores = queries @ keys.transpose(
-            -2, -1
-        )  # (B x S x H) @ (B x H x S) = B x S x S
-        scores_normalized = scores / math.sqrt(
-            self.config.attention_head_size
-        )  # B x S x S
-        lower_triangular_resized = self.lower_triangular[
-            :sequence_size, :sequence_size
-        ]  # S x S
-        scores_masked = scores_normalized.masked_fill(
-            lower_triangular_resized == 0, float("-inf")
-        )  # S x S
-        scores_activated = scores_masked.softmax(-1)  # S x S
-
         values = self.value_layer(hidden_states)  # B x S x H
-        hidden_states = (
-            scores_activated @ values
-        )  # (B x S x S) @ (B x S x H) = B x S x H
+
+        # What is happenning under the hood - not optimal
+        # _, sequence_size, _ = hidden_states.size()  # B x S x E
+        # scores = queries @ keys.transpose(
+        #     -2, -1
+        # )  # (B x S x H) @ (B x H x S) = B x S x S
+        # scores_normalized = scores / math.sqrt(
+        #     self.config.attention_head_size
+        # )  # B x S x S
+        # lower_triangular_resized = self.lower_triangular[
+        #     :sequence_size, :sequence_size
+        # ]  # S x S
+        # scores_masked = scores_normalized.masked_fill(
+        #     lower_triangular_resized == 0, float("-inf")
+        # )  # S x S
+        # scores_activated = scores_masked.softmax(-1)  # S x S
+        # hidden_states = (
+        #     scores_activated @ values
+        # )  # (B x S x S) @ (B x S x H) = B x S x H
+
+        # Optimization 4 - Flash Attention
+        hidden_states = F.scaled_dot_product_attention(
+            queries, keys, values, is_causal=True
+        )
 
         return hidden_states
