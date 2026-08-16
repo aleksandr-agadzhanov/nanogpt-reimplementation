@@ -8,7 +8,7 @@ import torch
 from torch import distributed, nn
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-from data_loader import DataLoader
+from data_loaders.shard_data_loader import DataShardLoader
 from GPT import GPT, GPTConfig
 from hellaswag import iterate_examples, render_example, get_most_likely_row
 
@@ -62,8 +62,8 @@ num_gradient_accumulation_steps = total_batch_size // (batch_size * sequence_siz
 if master_process:
     print(f"Number of gradient accumulation steps = {total_batch_size} // ({batch_size} * {sequence_size} * {ddp_world_size}) = {num_gradient_accumulation_steps}")
 
-train_loader = DataLoader("tiny_shakespeare.txt", 4, 32, ddp_rank, ddp_world_size, "train")
-val_loader = DataLoader("tiny_shakespeare.txt", 4, 32, ddp_rank, ddp_world_size, "val")
+train_loader = DataShardLoader("tiny_shakespeare.txt", 4, 32, ddp_rank, ddp_world_size, "train")
+val_loader = DataShardLoader("tiny_shakespeare.txt", 4, 32, ddp_rank, ddp_world_size, "val")
 
 # Optimization 1
 torch.set_float32_matmul_precision("high")

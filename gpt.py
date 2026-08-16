@@ -205,7 +205,9 @@ class GPT(nn.Module):
         if last_position_only:
             hidden_states = hidden_states[:, -1:, :]  # B x S x E -> B x 1 x E
 
-        logits = self.language_model_head(hidden_states)  # B x S x E -> B x S x V or B x 1 x E -> B x 1 x V
+        logits = self.language_model_head(
+            hidden_states
+        )  # B x S x E -> B x S x V or B x 1 x E -> B x 1 x V
 
         loss = None
         if targets is not None:

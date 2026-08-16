@@ -56,21 +56,19 @@ def test_pretrained_gpt2_generates_plausible_continuations():
     while tokens.size(1) < max_sequence_length:
         with torch.no_grad():
             logits, _ = model(tokens, last_position_only=True)  # B x S x E -> B x 1 x V
-            logits = logits.squeeze(1)  # B x 1 x V -> B x V, drop the size-1 sequence dim
+            logits = logits.squeeze(
+                1
+            )  # B x 1 x V -> B x V, drop the size-1 sequence dim
             probabilities = logits.softmax(-1)
 
             # Sample from the top-k most likely tokens
             top_k_probabilities, top_k_indices = torch.topk(probabilities, top_k, -1)
 
             # Sample an index from the top-k probabilities for each sequence in the batch
-            sampled_index = torch.multinomial(
-                top_k_probabilities, 1
-            )
+            sampled_index = torch.multinomial(top_k_probabilities, 1)
 
             # Map the sampled index back to a real token ID using the top-k indices
-            next_tokens = torch.gather(
-                top_k_indices, -1, sampled_index
-            )
+            next_tokens = torch.gather(top_k_indices, -1, sampled_index)
 
             # Append the sampled token IDs to the existing sequences
             tokens = torch.cat((tokens, next_tokens), dim=-1)

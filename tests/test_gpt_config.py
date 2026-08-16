@@ -10,7 +10,9 @@ from gpt import GPTConfig
 
 def test_default_config_is_valid():
     config = GPTConfig()
-    assert config.embedding_size == config.attention_head_size * config.num_attention_heads
+    assert (
+        config.embedding_size == config.attention_head_size * config.num_attention_heads
+    )
 
 
 def test_custom_valid_config_is_accepted():
@@ -30,7 +32,9 @@ def test_custom_valid_config_is_accepted():
 def test_embedding_size_need_not_be_a_power_of_two():
     # embedding_size is derived from head_size * num_heads, so it isn't itself
     # required to be a power of 2 (e.g. GPT-2's 768 = 64 * 12).
-    config = GPTConfig(embedding_size=768, attention_head_size=64, num_attention_heads=12)
+    config = GPTConfig(
+        embedding_size=768, attention_head_size=64, num_attention_heads=12
+    )
     assert config.embedding_size == 768
 
 

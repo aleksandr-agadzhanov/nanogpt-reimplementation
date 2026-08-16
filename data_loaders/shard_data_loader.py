@@ -5,7 +5,7 @@ import torch
 
 
 # TODO: add functionality to permute the data randomly in every single shard on every single new epoch, and to maybe even permute the shards
-class DataLoader:
+class ShardDataLoader:
     def __init__(
         self, folder_name, batch_size, context_size, process_rank, num_processes, split
     ):
@@ -29,7 +29,7 @@ class DataLoader:
     def reset(self):
         self.current_shard = 0
         self.current_position = self.batch_size * self.context_size * self.process_rank
-        self.tokens = DataLoader.load_tokens(self.shard_paths[self.current_shard])
+        self.tokens = ShardDataLoader.load_tokens(self.shard_paths[self.current_shard])
 
     def get_next_batch(self):
         # Without replacement
@@ -53,7 +53,7 @@ class DataLoader:
         ):
             # Looping is introduced so that when we are out of shards, we can start from the first shard again
             self.current_shard = (self.current_shard + 1) % len(self.shard_paths)
-            self.tokens = self.load_tokens(self.shard_paths[self.current_shard])
+            self.tokens = ShardDataLoader.load_tokens(self.shard_paths[self.current_shard])
             self.current_position = (
                 self.batch_size * self.context_size * self.process_rank
             )
