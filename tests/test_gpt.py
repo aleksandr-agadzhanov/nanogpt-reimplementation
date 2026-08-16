@@ -116,6 +116,31 @@ def test_gpt_forward_without_targets_returns_no_loss(small_config):
     assert loss is None
 
 
+def test_gpt_forward_last_position_only_returns_single_position_logits(small_config):
+    model = GPT(small_config)
+    tokens = torch.randint(0, small_config.vocabulary_size, (2, 6))
+
+    logits, loss = model(tokens, last_position_only=True)
+
+    assert logits.shape == (2, 1, small_config.vocabulary_size)
+    assert loss is None
+    # Slicing the last position out of the full forward pass should match the
+    # optimized last_position_only path, modulo float32 matmul rounding noise.
+    full_logits, _ = model(tokens)
+    assert torch.allclose(logits, full_logits[:, -1:, :], atol=1e-5, rtol=1e-4)
+
+
+def test_gpt_forward_raises_when_last_position_only_combined_with_targets(
+    small_config,
+):
+    model = GPT(small_config)
+    tokens = torch.randint(0, small_config.vocabulary_size, (2, 6))
+    targets = torch.randint(0, small_config.vocabulary_size, (2, 6))
+
+    with pytest.raises(ValueError, match="last_position_only"):
+        model(tokens, targets, last_position_only=True)
+
+
 def test_gpt_forward_with_targets_computes_scalar_loss(small_config):
     model = GPT(small_config)
     tokens = torch.randint(0, small_config.vocabulary_size, (2, 6))

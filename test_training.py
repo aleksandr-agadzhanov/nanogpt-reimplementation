@@ -168,7 +168,7 @@ for step in range(max_steps):
         while xgen.size(1) < max_length:
             with torch.no_grad():
                 with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                    logits, loss = model(xgen)
+                    logits, loss = model(xgen, last_position_only=True)
                 logits = logits[:, -1, :]
                 probs = logits.softmax(-1)
                 topk_probs, topk_indices = torch.topk(probs, 50, -1)

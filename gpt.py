@@ -153,7 +153,10 @@ class GPT(nn.Module):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(
-        self, tokens: torch.Tensor, targets: torch.Tensor | None = None
+        self,
+        tokens: torch.Tensor,
+        targets: torch.Tensor | None = None,
+        last_position_only: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Runs a forward pass and optionally computes the next-token loss.
 
@@ -161,11 +164,19 @@ class GPT(nn.Module):
             tokens: Token ids of shape (B, S); S must not exceed config.context_size.
             targets: Optional next-token ids of shape (B, S), aligned so that
                 targets[:, s] is the label for tokens[:, s].
+            last_position_only: If True, skips projecting every position to
+                vocabulary logits and only does so for the last one; useful during
+                generation, where only the next token's logits are ever needed.
+                Must not be set when `targets` is given, since loss needs every
+                position's logits.
 
         Returns:
-            logits of shape (B, S, V), and loss (a scalar tensor, or None if
-            `targets` was not given).
+            logits of shape (B, S, V) (or (B, 1, V) if `last_position_only`), and
+            loss (a scalar tensor, or None if `targets` was not given).
         """
+        if last_position_only and targets is not None:
+            raise ValueError("last_position_only cannot be used together with targets")
+
         _, sequence_size = tokens.size()
         # If the sequence length exceeds the model's context size, it cannot be processed.
         if sequence_size > self.config.context_size:
@@ -191,7 +202,10 @@ class GPT(nn.Module):
 
         hidden_states = self.layer_norm(hidden_states)  # B x S x E
 
-        logits = self.language_model_head(hidden_states)  # B x S x E -> B x S x V
+        if last_position_only:
+            hidden_states = hidden_states[:, -1:, :]  # B x S x E -> B x 1 x E
+
+        logits = self.language_model_head(hidden_states)  # B x S x E -> B x S x V or B x 1 x E -> B x 1 x V
 
         loss = None
         if targets is not None:
