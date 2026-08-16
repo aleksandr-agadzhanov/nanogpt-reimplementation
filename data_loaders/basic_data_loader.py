@@ -3,6 +3,8 @@ from pathlib import Path
 import tiktoken
 import torch
 
+from data_loaders.data_loader_utils import slice_input_output_batch
+
 TRAINING_DATASETS_DIR = Path(__file__).resolve().parent.parent / "training_datasets"
 
 
@@ -64,17 +66,10 @@ class BasicDataLoader:
                 the next-token target for inputs[:, s], also of shape
                 (batch_size, context_size).
         """
-        # Read one extra token beyond tokens_per_batch, since outputs need a target
-        # for the last input position too.
-        batch_end_index = self.current_index + self.tokens_per_batch + 1
-        tokens_batch = self.tokens[self.current_index : batch_end_index]
-
-        # Input tokens are all but the last token, reshaped into (batch_size, context_size).
-        inputs = tokens_batch[:-1].view(self.batch_size, self.context_size)
-
-        # Output tokens are the input tokens shifted right by one, also reshaped into
-        # (batch_size, context_size).
-        outputs = tokens_batch[1:].view(self.batch_size, self.context_size)
+        # Call the utility function to slice the tokens into (inputs, outputs) batch
+        inputs, outputs = slice_input_output_batch(
+            self.tokens, self.current_index, self.batch_size, self.context_size
+        )
 
         # Advance the current index by tokens_per_batch
         self.current_index = self.current_index + self.tokens_per_batch
