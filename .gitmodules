@@ -1,0 +1,3 @@
+[submodule "minbpe_reimplementation"]
+	path = minbpe_reimplementation
+	url = https://github.com/aleksandr-agadzhanov/minbpe-reimplementation.git

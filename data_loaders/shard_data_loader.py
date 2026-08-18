@@ -76,6 +76,8 @@ class ShardDataLoader:
             raise ValueError(
                 f"no shard files matching split={split!r} found in {folder_name!r}"
             )
+
+        # Initialize the shard order which will be used for reshuffling
         self.shard_order = list(range(len(self.shard_paths)))
 
         if process_index == 0:
@@ -87,6 +89,8 @@ class ShardDataLoader:
         """Rewinds to the first shard (in its current order) and this process's
         starting offset within it."""
         self.current_shard_index = 0
+        # Set the current index to this process's offset within the first shard.
+        # This way, every process reads a disjoint slice of the same data.
         self.current_index = self.tokens_per_microbatch * self.process_index
         self.shard_tokens = self._load_shard(self.current_shard_index)
 
@@ -102,10 +106,13 @@ class ShardDataLoader:
                 next-token target for inputs[:, s], also of shape
                 (batch_size, context_size).
         """
+        # Call the utility function to get the input and output tokens
         inputs, outputs = slice_input_output_batch(
             self.shard_tokens, self.current_index, self.batch_size, self.context_size
         )
 
+        # Advance the cursor by one whole batch, i.e. by the amount of tokens processed
+        # by all processes.
         self.current_index = (
             self.current_index + self.tokens_per_microbatch * self.num_processes
         )
@@ -150,7 +157,7 @@ class ShardDataLoader:
         shard_path = self.shard_paths[original_index]
         tokens = self._load_tokens_from_shard(shard_path)
 
-        # If the shard doesn't contain enough tokens for all processes to, raise an error.
+        # If the shard doesn't contain enough tokens for all processes, raise an error.
         tokens_per_batch = self.tokens_per_microbatch * self.num_processes
         if len(tokens) < tokens_per_batch + 1:
             raise ValueError(
@@ -169,13 +176,13 @@ class ShardDataLoader:
         tokens = self._permute_documents(tokens, generator)
         return tokens
 
-    def _derive_seed(self, part: int) -> int:
-        """Deterministically combines `self.seed` with `part` into a single seed, so
+    def _derive_seed(self, shard_index: int) -> int:
+        """Deterministically combines `self.seed` with `shard_index` into a single seed, so
         that e.g. different shards within the same pass get distinct document
         shuffles."""
         # A prime multiplier is used to reduce the chance of collisions between seeds
         # derived from different (seed, part) pairs.
-        return self.seed * 1_000_003 + part
+        return self.seed * 1_000_003 + shard_index
 
     @staticmethod
     def _permute_documents(
