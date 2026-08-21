@@ -20,7 +20,7 @@ class GPTConfig:
     # Size-related constants
     vocabulary_size: int = 16384  # Number of unique tokens in the vocabulary
     context_size: int = (
-        1024  # Max sequence length (number of positions) the model supports
+        1024  # Maximum sequence length (number of positions) the model supports
     )
     embedding_size: int = (
         768  # Dimensionality of token/position embeddings and residual stream

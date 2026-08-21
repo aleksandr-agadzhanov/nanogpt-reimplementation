@@ -59,6 +59,8 @@ class ShardDataLoader:
 
         # Advanced after each completed pass over all shards (see get_next_batch), so
         # that shuffles vary across passes while staying identical across processes.
+        # initial_seed is kept so reset() can restore it, making its shuffle reproducible.
+        self.initial_seed = seed
         self.seed = seed
 
         # Number of tokens per microbatch, i.e. per process, per batch
@@ -92,6 +94,9 @@ class ShardDataLoader:
         # Set the current index to this process's offset within the first shard.
         # This way, every process reads a disjoint slice of the same data.
         self.current_index = self.tokens_per_microbatch * self.process_index
+        # Restore the seed so the first shard's document shuffle is reproducible across
+        # repeated reset() calls, rather than drifting from prior get_next_batch wraparounds.
+        self.seed = self.initial_seed
         self.shard_tokens = self._load_shard(self.current_shard_index)
 
     def get_next_batch(self) -> tuple[torch.Tensor, torch.Tensor]:

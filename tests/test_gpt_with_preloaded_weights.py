@@ -23,8 +23,8 @@ def test_pretrained_gpt2_generates_plausible_continuations():
     """Loads real GPT-2 weights via `from_pretrained` and verifies that top-k
     sampled continuations are valid tokens and actually extend the prompt."""
     # Set the parameters for the test
-    num_return_sequences = 5
-    max_sequence_length = 30
+    num_return_sequences = 4
+    max_sequence_length = 32
     top_k = 50
     prompt = "Hello, I'm a language model,"
 
