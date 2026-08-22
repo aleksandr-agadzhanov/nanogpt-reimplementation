@@ -59,6 +59,9 @@ LOG_FILE_NAME = (
     "train_gpt_log.txt"  # name of the log file to save training and evaluation metrics
 )
 
+# Checkpointing configuration.
+CHECKPOINT_DIRECTORY = "checkpoints"  # directory to save model checkpoints
+
 # Generation configuration.
 GENERATION_PROMPT = "Hello, I'm a language model,"  # prompt to use
 GENERATION_NUM_RETURN_SEQUENCES = 4  # number of sequences to generate for each prompt
@@ -250,6 +253,128 @@ def get_learning_rate(step: int) -> float:
     return MIN_LEARNING_RATE + coefficient * (MAX_LEARNING_RATE - MIN_LEARNING_RATE)
 
 
+def initialize_log_file(log_directory: str, log_file_name: str) -> str:
+    """Create the log directory and initialize an empty log file.
+
+    Args:
+        log_directory: Directory in which to store the log file.
+        log_file_name: Name of the log file to create.
+
+    Returns:
+        The path to the initialized log file.
+    """
+    os.makedirs(log_directory, exist_ok=True)
+    log_file = os.path.join(log_directory, log_file_name)
+    with open(log_file, "w"):
+        pass
+    return log_file
+
+
+def write_log(log_file: str, message: str) -> None:
+    """Append a message followed by a newline to a log file.
+
+    Args:
+        log_file: Path to the log file.
+        message: Text to append to the log file.
+    """
+    with open(log_file, "a") as file:
+        file.write(f"{message}\n")
+
+
+def save_checkpoint(
+    model: nn.Module,
+    config: GPTConfig,
+    checkpoint_directory: str,
+    step: int,
+    val_loss: torch.Tensor,
+) -> str:
+    """Save model parameters and metadata to a checkpoint file.
+
+    Args:
+        model: The unwrapped model whose parameters should be saved.
+        config: Configuration used to construct the model.
+        checkpoint_directory: Directory in which to save the checkpoint.
+        step: Training step associated with the checkpoint.
+        val_loss: Validation loss associated with the checkpoint.
+
+    Returns:
+        The path to the saved checkpoint file.
+    """
+    os.makedirs(checkpoint_directory, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_directory, f"gpt_{step:05d}.pt")
+    checkpoint = {
+        "model": model.state_dict(),
+        "config": config,
+        "step": step,
+        "val_loss": val_loss.item(),
+    }
+    torch.save(checkpoint, checkpoint_path)
+    return checkpoint_path
+
+
+def run_validation(
+    model: nn.Module,
+    val_loader: ShardDataLoader,
+    val_steps: int,
+    device: str,
+    is_distributed: bool,
+) -> torch.Tensor:
+    """Evaluate the model and return the mean validation loss.
+
+    Args:
+        model: The model to evaluate.
+        val_loader: Data loader that provides validation batches.
+        val_steps: Number of validation batches to evaluate.
+        device: Device on which the model and validation batches reside.
+        is_distributed: Whether to average the loss across DDP processes.
+
+    Returns:
+        The mean validation loss across the requested batches and processes.
+    """
+    # Record whether the model was in training mode before evaluation
+    # so that it can be restored afterward.
+    was_training = model.training
+
+    # Set the model to evaluation mode to disable dropout and other training-specific behavior.
+    model.eval()
+
+    # Reset the validation data loader and shuffle the documents inside validation shards.
+    val_loader.reset()
+
+    # Initialize the accumulated validation loss to zero on the specified device.
+    val_loss_accumulated = torch.zeros((), device=device)
+
+    # Extract the device type (e.g., "cuda", "mps", "cpu") from the device string for autocast.
+    device_type = torch.device(device).type
+
+    # Use a try-finally block to ensure that the model's training state is restored.
+    try:
+        # Evaluate the model without computing gradients to save memory and computation.
+        with torch.no_grad():
+            for _ in range(val_steps):
+                # Get the next batch of validation data and move it to the specified device.
+                inputs, outputs = val_loader.get_next_batch()
+                inputs = inputs.to(device)
+                outputs = outputs.to(device)
+                # Use autocast to reduce memory usage and speed up evaluation
+                # by using lower precision for matrix multiplications.
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    # Compute the model's predictions and loss for the current batch.
+                    _, loss = model(inputs, outputs)
+                # Normalize the loss by the number of validation steps
+                loss = loss / val_steps
+                # Accumulate the normalized loss for averaging across all processes/
+                val_loss_accumulated = val_loss_accumulated + loss.detach()
+
+        # Average the per-process validation means across all DDP processes.
+        if is_distributed:
+            distributed.all_reduce(val_loss_accumulated, op=distributed.ReduceOp.AVG)
+    finally:
+        model.train(was_training)
+
+    return val_loss_accumulated
+
+
 def main() -> None:
     # Setup distributed data parallel (DDP) if available, otherwise fall back to a single process.
     (
@@ -322,52 +447,52 @@ def main() -> None:
         weight_decay=WEIGHT_DECAY, learning_rate=MAX_LEARNING_RATE, device=device
     )
 
+    # Initialize the log file to record training and evaluation metrics.
+    log_file = initialize_log_file(LOG_DIRECTORY, LOG_FILE_NAME)
 
-    os.makedirs(LOG_DIRECTORY, exist_ok=True)
-    log_file = os.path.join(LOG_DIRECTORY, LOG_FILE_NAME)
-    with open(log_file, "w"):
-        pass
-
+    # Main training loop
     for step in range(NUM_TRAIN_STEPS):
+        # Record the start time of the step to measure training speed.
         t0 = time.time()
-        last_step = step == NUM_TRAIN_STEPS - 1
 
-        # Validation
-        if step % EVAL_INTERVAL_STEPS == 0 or last_step:
-            model.eval()
-            val_loader.reset()
-            with torch.no_grad():
-                val_loss_accumulated = 0
-                for _ in range(VAL_STEPS):
-                    x, y = val_loader.get_next_batch()
-                    x = x.to(device)
-                    y = y.to(device)
-                    with torch.autocast(device_type=device, dtype=torch.bfloat16):
-                        logits, loss = model(x, y)
-                    loss = loss / VAL_STEPS
-                    val_loss_accumulated = val_loss_accumulated + loss.detach()
-            if is_distributed:
-                distributed.all_reduce(
-                    val_loss_accumulated, op=distributed.ReduceOp.AVG
-                )
+        # Create a flag to indicate whether this is the last training step
+        # used for evaluation and checkpointing.
+        is_last_step = step == NUM_TRAIN_STEPS - 1
+
+        # Every EVAL_INTERVAL_STEPS or on the last step, run validation.
+        if step % EVAL_INTERVAL_STEPS == 0 or is_last_step:
+            val_loss_accumulated = run_validation(
+                model, val_loader, VAL_STEPS, device, is_distributed
+            )
+            # If this is the master process, print and log the validation loss.
             if is_master_process:
-                print(f"Validation loss {val_loss_accumulated.item():.4f}")
-                with open(log_file, "w") as file:
-                    file.write(f"{step} val {val_loss_accumulated.item():.4f}\n")
-                if step > 0 and (step % CHECKPOINT_INTERVAL_STEPS == 0 or last_step):
-                    checkpoint_path = os.path.join(
-                        LOG_DIRECTORY, f"model_{step:05d}.pt"
-                    )
-                    checkpoint = {
-                        "model": model.state_dict(),
-                        "config": raw_model.config,
-                        "step": step,
-                        "val_loss": val_loss_accumulated,
-                    }
-                    torch.save(checkpoint, checkpoint_path)
+                validation_message = (
+                    f"Step {step:05d} | validation loss: "
+                    f"{val_loss_accumulated.item():.4f}"
+                )
+                print(validation_message)
+                write_log(log_file, validation_message)
+
+        # If this is the master process, every CHECKPOINT_INTERVAL_STEPS (apart from the
+        # first step) or on the last step, save a model checkpoint.
+        if is_master_process and (
+            step > 0 and (step % CHECKPOINT_INTERVAL_STEPS == 0 or is_last_step)
+        ):
+            checkpoint_path = save_checkpoint(
+                raw_model,
+                raw_model.config,
+                CHECKPOINT_DIRECTORY,
+                step,
+                val_loss_accumulated,
+            )
+            checkpoint_message = (
+                f"Step {step:05d} | checkpoint saved: {checkpoint_path}"
+            )
+            print(checkpoint_message)
+            write_log(log_file, checkpoint_message)
 
         # Hellaswag evaluation
-        if (step % EVAL_INTERVAL_STEPS == 0 or last_step) and not USE_COMPILE:
+        if (step % EVAL_INTERVAL_STEPS == 0 or is_last_step) and not USE_COMPILE:
             num_correct_norm = 0
             num_total = 0
             for i, example in enumerate(iterate_examples("val")):
@@ -395,15 +520,16 @@ def main() -> None:
                     num_correct_norm = num_correct_norm.item()
                 acc_norm = num_correct_norm / num_total
                 if is_master_process:
-                    print(
-                        f"HellaSwag accuracy: {num_correct_norm}/{num_total}={acc_norm:4f}"
+                    hellaswag_message = (
+                        f"Step {step:05d} | HellaSwag accuracy: "
+                        f"{acc_norm:.4f} ({num_correct_norm}/{num_total})"
                     )
-                    with open(log_file, "w") as file:
-                        file.write(f"{step} hella {acc_norm:4f}\n")
+                    print(hellaswag_message)
+                    write_log(log_file, hellaswag_message)
 
         # Generation - REQUIRES DISABLING MODEL COMPLILE, SO DON'T DO IT TO TRAIN (test first, maybe not)
         if (
-            (step > 0 and step % EVAL_INTERVAL_STEPS == 0) or last_step
+            (step > 0 and step % EVAL_INTERVAL_STEPS == 0) or is_last_step
         ) and not USE_COMPILE:
             model.eval()
             tokens = tokenizer.encode(GENERATION_PROMPT)
@@ -421,7 +547,7 @@ def main() -> None:
                     topk_probs, topk_indices = torch.topk(probs, GENERATION_TOP_K, -1)
                     ix = torch.multinomial(topk_probs, 1, generator=sample_rng)
                     xcol = torch.gather(topk_indices, -1, ix)
-                    x = torch.cat((x, xcol), dim=-1)
+                    x = torch.cat((xgen, xcol), dim=-1)
             for i in range(GENERATION_NUM_RETURN_SEQUENCES):
                 tokens = x[i, :GENERATION_MAX_LENGTH].tolist()
                 decoded = tokenizer.decode(tokens)
@@ -478,11 +604,13 @@ def main() -> None:
         tokens_per_second = tokens_processed / (t1 - t0)
 
         if is_master_process:
-            print(
-                f"Step {step:4d} | loss {loss_accumulated.item():.6f} | lr {lr:.4e} | norm {norm:.4f} | dt {dt:.2f}ms | tokens/s {tokens_per_second:.2f}"
+            training_message = (
+                f"Step {step:05d} | train loss: {loss_accumulated.item():.6f} | "
+                f"lr: {lr:.4e} | grad norm: {norm:.4f} | "
+                f"time: {dt:.2f} ms | tokens/s: {tokens_per_second:.2f}"
             )
-            with open(log_file, "w") as file:
-                file.write(f"{step} train {loss_accumulated.item():.6f}\n")
+            print(training_message)
+            write_log(log_file, training_message)
 
     if is_distributed:
         distributed.destroy_process_group()
